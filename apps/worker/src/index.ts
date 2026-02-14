@@ -4,37 +4,33 @@ type Bindings = { TURNSTILE_SECRET: string };
 type TurnstileResponse = { success?: boolean };
 
 const app = new Hono<{ Bindings: Bindings }>();
+const allowedOrigin = "https://disputeshield.app";
 
-const ALLOWED_ORIGINS = new Set([
-  "https://disputeshield.app",
-]);
+const getAllowedOrigin = (origin: string | null) => {
+  if (origin === allowedOrigin) return origin;
+  if (origin && origin.endsWith(".pages.dev")) return origin;
+  return allowedOrigin;
+};
 
-const isPreviewOrigin = (origin: string) =>
-  origin.startsWith("https://") && origin.endsWith(".pages.dev");
-
-function getAllowedOrigin(reqOrigin: string | null) {
-  if (!reqOrigin) return "https://disputeshield.app";
-  if (ALLOWED_ORIGINS.has(reqOrigin) || isPreviewOrigin(reqOrigin)) return reqOrigin;
-  return "https://disputeshield.app";
-}
-
-function withCors(c: any) {
+app.use("*", async (c, next) => {
   const origin = getAllowedOrigin(c.req.header("Origin") ?? null);
   c.header("Access-Control-Allow-Origin", origin);
   c.header("Vary", "Origin");
+  c.header("Access-Control-Allow-Credentials", "false");
   c.header("Access-Control-Allow-Methods", "POST, OPTIONS");
-  c.header("Access-Control-Allow-Headers", "content-type");
-  c.header("Access-Control-Max-Age", "86400");
-}
+  c.header(
+    "Access-Control-Allow-Headers",
+    c.req.header("Access-Control-Request-Headers") ?? "Content-Type",
+  );
 
-app.options("/turnstile/*", (c) => {
-  withCors(c);
-  return c.body(null, 204);
+  if (c.req.method === "OPTIONS") {
+    return c.body(null, 204);
+  }
+
+  await next();
 });
 
 app.post("/turnstile/verify", async (c) => {
-  withCors(c);
-
   let token = "";
   try {
     const body = (await c.req.json()) as { token?: string };
@@ -52,7 +48,7 @@ app.post("/turnstile/verify", async (c) => {
 
   const resp = await fetch(
     "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-    { method: "POST", body: formData }
+    { method: "POST", body: formData },
   );
 
   const data = (await resp.json()) as TurnstileResponse;
