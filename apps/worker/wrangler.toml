@@ -1,0 +1,6 @@
+﻿name = "disputeshield-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[vars]
+# TURNSTILE_SECRET will be set in Cloudflare dashboard or via wrangler secret
