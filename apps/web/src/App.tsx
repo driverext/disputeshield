@@ -2,6 +2,7 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import JSZip from "jszip";
 import { Turnstile } from "@marsidev/react-turnstile";
+import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 
 type FormState = {
   merchant_name: string;
@@ -159,7 +160,32 @@ const createAttachmentId = () => {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
-export default function App() {
+const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
+  const copy = new Uint8Array(bytes);
+  return copy.buffer;
+};
+
+function Home() {
+  return (
+    <div className="home">
+      <div className="hero">
+        <div>
+          <p className="eyebrow">DisputeShield</p>
+          <h1>Build bank-ready chargeback evidence in minutes.</h1>
+          <p className="subhead">
+            Generate a clean PDF + ZIP packet with timelines, policies, and
+            attachment indexes—entirely client-side.
+          </p>
+          <Link to="/app" className="cta">
+            Generate Evidence Packet
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EvidenceApp() {
   const [form, setForm] = useState<FormState>(initialState);
   const [timelineInput, setTimelineInput] = useState("");
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -419,11 +445,6 @@ export default function App() {
     });
 
     return pdfDoc.save();
-  };
-
-  const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
-    const copy = new Uint8Array(bytes);
-    return copy.buffer;
   };
 
   const setPdfFromBytes = (bytes: Uint8Array) => {
@@ -921,5 +942,26 @@ export default function App() {
       {zipTip && <p className="message">{zipTip}</p>}
       {zipSuccess && <p className="message success">{zipSuccess}</p>}
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <div className="nav">
+        <Link to="/" className="nav-brand">
+          DisputeShield
+        </Link>
+        <div className="nav-links">
+          <Link to="/">Home</Link>
+          <Link to="/app">App</Link>
+        </div>
+      </div>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/app" element={<EvidenceApp />} />
+        <Route path="*" element={<Home />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
