@@ -5,12 +5,26 @@ import { Turnstile } from "@marsidev/react-turnstile";
 import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 import Home from "./pages/Home";
 
+const DISPUTE_REASONS = [
+  { value: "fraud", label: "Fraud/Unauthorized" },
+  { value: "product_not_received", label: "Product not received" },
+  { value: "product_unacceptable", label: "Product unacceptable" },
+  { value: "credit_not_processed", label: "Credit not processed" },
+  { value: "duplicate_unrecognized", label: "Duplicate/Unrecognized" },
+  { value: "other", label: "Other" },
+] as const;
+
+type DisputeReason = (typeof DISPUTE_REASONS)[number]["value"];
+
+const getReasonLabel = (reason: DisputeReason) =>
+  DISPUTE_REASONS.find((item) => item.value === reason)?.label ?? "Other";
+
 type FormState = {
   merchant_name: string;
   order_id: string;
   amount: string;
   currency: string;
-  dispute_reason: string;
+  dispute_reason: DisputeReason;
   timeline: string[];
   customer_email: string;
   billing_address: string;
@@ -23,16 +37,23 @@ type FormState = {
   customer_communication_notes: string;
 };
 
-type ChecklistItem = {
-  id: string;
-  label: string;
-  present: boolean;
-};
-
 type AttachmentItem = {
   id: string;
   file: File;
   note: string;
+};
+
+type PdfStats = {
+  sizeBytes: number;
+  pageCount: number;
+};
+
+type EvidencePriority = "critical" | "recommended";
+
+type EvidenceCatalogEntry = {
+  label: string;
+  tooltip: string;
+  isPresent: (form: FormState, attachments: AttachmentItem[]) => boolean;
 };
 
 const initialState: FormState = {
@@ -40,7 +61,7 @@ const initialState: FormState = {
   order_id: "",
   amount: "",
   currency: "USD",
-  dispute_reason: "",
+  dispute_reason: DISPUTE_REASONS[0].value,
   timeline: [],
   customer_email: "",
   billing_address: "",
@@ -54,6 +75,9 @@ const initialState: FormState = {
 };
 
 const SHOW_BRANDING_FOOTER = true;
+const PDF_SIZE_WARNING_BYTES = 2_500_000;
+const PDF_PAGE_WARNING_COUNT = 20;
+const ATTACHMENTS_WARNING_BYTES = 10 * 1024 * 1024;
 
 const inputClassName =
   "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200";
@@ -124,39 +148,216 @@ const normalizeTimelineEvent = (event: string) => {
   return normalizeSentenceCase(trimmed);
 };
 
-const computeChecklist = (form: FormState): ChecklistItem[] => {
-  const has = (value: string) => value.trim().length > 0;
+const hasValue = (value: string) => value.trim().length > 0;
 
-  const proofOfDelivery =
-    (has(form.tracking_number) && has(form.carrier)) ||
-    has(form.delivery_date);
-  const proofOfAuthorization =
-    has(form.billing_address) || has(form.ip_address) || has(form.customer_email);
-  const policies = has(form.policy_url) || has(form.refund_policy_excerpt);
-  const communication = has(form.customer_communication_notes);
+const EVIDENCE_CATALOG = {
+  proof_delivery: {
+    label: "Proof of delivery",
+    tooltip: "Tracking + carrier or delivery confirmation date.",
+    isPresent: (form: FormState) =>
+      (hasValue(form.tracking_number) && hasValue(form.carrier)) ||
+      hasValue(form.delivery_date),
+  },
+  tracking_details: {
+    label: "Tracking details",
+    tooltip: "Carrier tracking number for shipment evidence.",
+    isPresent: (form: FormState) => hasValue(form.tracking_number),
+  },
+  carrier_info: {
+    label: "Carrier confirmation",
+    tooltip: "Carrier name or service used for fulfillment.",
+    isPresent: (form: FormState) => hasValue(form.carrier),
+  },
+  delivery_date: {
+    label: "Delivery confirmation date",
+    tooltip: "Date the carrier marked the package delivered.",
+    isPresent: (form: FormState) => hasValue(form.delivery_date),
+  },
+  authorization_signals: {
+    label: "Authorization signals",
+    tooltip: "Billing address, IP, or customer email match.",
+    isPresent: (form: FormState) =>
+      hasValue(form.billing_address) ||
+      hasValue(form.ip_address) ||
+      hasValue(form.customer_email),
+  },
+  billing_address: {
+    label: "Billing address match",
+    tooltip: "Billing address captured at checkout.",
+    isPresent: (form: FormState) => hasValue(form.billing_address),
+  },
+  ip_address: {
+    label: "IP address match",
+    tooltip: "IP captured during checkout or account login.",
+    isPresent: (form: FormState) => hasValue(form.ip_address),
+  },
+  customer_email: {
+    label: "Customer email match",
+    tooltip: "Email captured at checkout.",
+    isPresent: (form: FormState) => hasValue(form.customer_email),
+  },
+  policies: {
+    label: "Refund/cancellation policy",
+    tooltip: "Published policy URL or excerpt.",
+    isPresent: (form: FormState) =>
+      hasValue(form.policy_url) || hasValue(form.refund_policy_excerpt),
+  },
+  refund_policy_excerpt: {
+    label: "Policy excerpt",
+    tooltip: "Relevant policy text for the dispute reason.",
+    isPresent: (form: FormState) => hasValue(form.refund_policy_excerpt),
+  },
+  policy_url: {
+    label: "Policy URL",
+    tooltip: "Link to your published policy page.",
+    isPresent: (form: FormState) => hasValue(form.policy_url),
+  },
+  customer_comms: {
+    label: "Customer communications",
+    tooltip: "Emails, chats, or tickets acknowledging the order.",
+    isPresent: (form: FormState) => hasValue(form.customer_communication_notes),
+  },
+  timeline: {
+    label: "Timeline of events",
+    tooltip: "Key order, fulfillment, and delivery milestones.",
+    isPresent: (form: FormState) => form.timeline.length > 0,
+  },
+  attachments: {
+    label: "Supporting attachments",
+    tooltip: "Screenshots, receipts, tracking scans, or files.",
+    isPresent: (_form: FormState, attachments: AttachmentItem[]) =>
+      attachments.length > 0,
+  },
+} satisfies Record<string, EvidenceCatalogEntry>;
 
-  return [
-    {
-      id: "proof_delivery",
-      label: "Proof of delivery",
-      present: proofOfDelivery,
-    },
-    {
-      id: "proof_authorization",
-      label: "Proof of authorization",
-      present: proofOfAuthorization,
-    },
-    {
-      id: "policies",
-      label: "Policies",
-      present: policies,
-    },
-    {
-      id: "communication",
-      label: "Customer communication",
-      present: communication,
-    },
-  ];
+type EvidenceId = keyof typeof EVIDENCE_CATALOG;
+
+type EvidenceItem = {
+  id: EvidenceId;
+  label: string;
+  tooltip: string;
+  priority: EvidencePriority;
+  present: boolean;
+};
+
+const REASON_EVIDENCE_MAP: Record<
+  DisputeReason,
+  { items: Array<{ id: EvidenceId; priority: EvidencePriority }> }
+> = {
+  fraud: {
+    items: [
+      { id: "authorization_signals", priority: "critical" },
+      { id: "ip_address", priority: "critical" },
+      { id: "billing_address", priority: "recommended" },
+      { id: "customer_email", priority: "recommended" },
+      { id: "customer_comms", priority: "recommended" },
+      { id: "timeline", priority: "recommended" },
+      { id: "attachments", priority: "recommended" },
+    ],
+  },
+  product_not_received: {
+    items: [
+      { id: "proof_delivery", priority: "critical" },
+      { id: "tracking_details", priority: "critical" },
+      { id: "carrier_info", priority: "recommended" },
+      { id: "delivery_date", priority: "recommended" },
+      { id: "customer_comms", priority: "recommended" },
+      { id: "timeline", priority: "recommended" },
+      { id: "attachments", priority: "recommended" },
+    ],
+  },
+  product_unacceptable: {
+    items: [
+      { id: "policies", priority: "critical" },
+      { id: "customer_comms", priority: "critical" },
+      { id: "attachments", priority: "critical" },
+      { id: "timeline", priority: "recommended" },
+      { id: "refund_policy_excerpt", priority: "recommended" },
+      { id: "delivery_date", priority: "recommended" },
+      { id: "authorization_signals", priority: "recommended" },
+    ],
+  },
+  credit_not_processed: {
+    items: [
+      { id: "policies", priority: "critical" },
+      { id: "customer_comms", priority: "critical" },
+      { id: "timeline", priority: "critical" },
+      { id: "refund_policy_excerpt", priority: "recommended" },
+      { id: "attachments", priority: "recommended" },
+      { id: "authorization_signals", priority: "recommended" },
+    ],
+  },
+  duplicate_unrecognized: {
+    items: [
+      { id: "authorization_signals", priority: "critical" },
+      { id: "timeline", priority: "critical" },
+      { id: "billing_address", priority: "recommended" },
+      { id: "ip_address", priority: "recommended" },
+      { id: "customer_comms", priority: "recommended" },
+      { id: "attachments", priority: "recommended" },
+    ],
+  },
+  other: {
+    items: [
+      { id: "timeline", priority: "critical" },
+      { id: "attachments", priority: "recommended" },
+      { id: "policies", priority: "recommended" },
+      { id: "customer_comms", priority: "recommended" },
+      { id: "authorization_signals", priority: "recommended" },
+      { id: "proof_delivery", priority: "recommended" },
+    ],
+  },
+};
+
+const buildEvidenceItems = (
+  reason: DisputeReason,
+  form: FormState,
+  attachments: AttachmentItem[],
+): EvidenceItem[] => {
+  const config = REASON_EVIDENCE_MAP[reason] ?? REASON_EVIDENCE_MAP.other;
+  return config.items.map((item) => {
+    const definition = EVIDENCE_CATALOG[item.id];
+    return {
+      id: item.id,
+      label: definition.label,
+      tooltip: definition.tooltip,
+      priority: item.priority,
+      present: definition.isPresent(form, attachments),
+    };
+  });
+};
+
+const sortEvidenceByStrength = (items: EvidenceItem[]) => {
+  const priorityRank: Record<EvidencePriority, number> = {
+    critical: 0,
+    recommended: 1,
+  };
+
+  return [...items].sort((a, b) => {
+    if (a.present !== b.present) {
+      return a.present ? -1 : 1;
+    }
+    const priorityDelta = priorityRank[a.priority] - priorityRank[b.priority];
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+    return a.label.localeCompare(b.label);
+  });
+};
+
+const sortEvidenceByPriority = (items: EvidenceItem[]) => {
+  const priorityRank: Record<EvidencePriority, number> = {
+    critical: 0,
+    recommended: 1,
+  };
+
+  return [...items].sort((a, b) => {
+    const priorityDelta = priorityRank[a.priority] - priorityRank[b.priority];
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+    return a.label.localeCompare(b.label);
+  });
 };
 
 const createAttachmentId = () => {
@@ -171,11 +372,24 @@ const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
   return copy.buffer;
 };
 
+const formatBytes = (bytes: number) => {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const kb = bytes / 1024;
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} KB`;
+  }
+  const mb = kb / 1024;
+  return `${mb.toFixed(2)} MB`;
+};
+
 function EvidenceApp() {
   const [form, setForm] = useState<FormState>(initialState);
   const [timelineInput, setTimelineInput] = useState("");
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
+  const [pdfStats, setPdfStats] = useState<PdfStats | null>(null);
   const [isZipping, setIsZipping] = useState(false);
   const [zipError, setZipError] = useState<string | null>(null);
   const [zipSuccess, setZipSuccess] = useState<string | null>(null);
@@ -201,10 +415,36 @@ function EvidenceApp() {
   const canGeneratePdf = hasHumanToken && !isGeneratingPdf && !isVerifying;
   const canExportZip =
     orderIdTrimmed.length > 0 && hasHumanToken && !isZipping && !isVerifying;
-  const checklist = computeChecklist(form);
-  const missingChecklistCount = checklist.filter((item) => !item.present).length;
-  const showChecklistWarning = missingChecklistCount >= 2;
+  const reason = form.dispute_reason;
+  const reasonLabel = getReasonLabel(reason);
+  const evidenceItems = buildEvidenceItems(reason, form, attachments);
+  const criticalEvidence = evidenceItems.filter(
+    (item) => item.priority === "critical",
+  );
+  const recommendedEvidence = evidenceItems.filter(
+    (item) => item.priority === "recommended",
+  );
+  const missingRecommendedCount = recommendedEvidence.filter(
+    (item) => !item.present,
+  ).length;
+  const showChecklistWarning = missingRecommendedCount >= 2;
   const hasAttachments = attachments.length > 0;
+  const attachmentsTotalBytes = attachments.reduce(
+    (total, item) => total + item.file.size,
+    0,
+  );
+  const showPdfLimitWarning =
+    pdfStats !== null &&
+    (pdfStats.sizeBytes > PDF_SIZE_WARNING_BYTES ||
+      pdfStats.pageCount > PDF_PAGE_WARNING_COUNT);
+  const showAttachmentSizeWarning =
+    attachmentsTotalBytes > ATTACHMENTS_WARNING_BYTES;
+  const pdfEstimateText = pdfStats
+    ? `Last generated PDF: ${formatBytes(pdfStats.sizeBytes)} · ${pdfStats.pageCount} pages`
+    : "Generate a PDF to estimate size and page count.";
+  const attachmentsEstimateText = `Attachments total: ${formatBytes(
+    attachmentsTotalBytes,
+  )}`;
 
   useEffect(() => {
     return () => {
@@ -214,7 +454,10 @@ function EvidenceApp() {
     };
   }, [pdfUrl]);
 
-  const updateField = (field: keyof FormState, value: string) => {
+  const updateField = <K extends keyof FormState>(
+    field: K,
+    value: FormState[K],
+  ) => {
     setForm((prev) => ({ ...prev, [field]: value }));
   };
 
@@ -313,11 +556,67 @@ function EvidenceApp() {
     const pdfDoc = await PDFDocument.create();
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-    let page = pdfDoc.addPage();
-    const { height } = page.getSize();
     const margin = 50;
     const defaultSize = 12;
     const lineGap = 6;
+    const generatedAt = new Date().toLocaleString();
+    const reasonValue = form.dispute_reason;
+    const reasonText = getReasonLabel(reasonValue);
+    const evidenceItemsForReason = buildEvidenceItems(
+      reasonValue,
+      form,
+      attachments,
+    );
+    const evidenceByStrength = sortEvidenceByStrength(evidenceItemsForReason);
+    const evidenceByPriority = sortEvidenceByPriority(evidenceItemsForReason);
+    const strongestIncluded = evidenceByStrength
+      .filter((item) => item.present)
+      .slice(0, 3);
+    const timelineHighlights = form.timeline
+      .map((event) => normalizeTimelineEvent(event).trim())
+      .filter(Boolean)
+      .slice(0, 3);
+
+    const coverPage = pdfDoc.addPage();
+    const { height: coverHeight } = coverPage.getSize();
+    let coverY = coverHeight - margin;
+
+    const drawCoverLine = (text: string, size = defaultSize) => {
+      coverPage.drawText(text, {
+        x: margin,
+        y: coverY,
+        size,
+        font,
+        color: rgb(0, 0, 0),
+      });
+      coverY -= size + lineGap;
+    };
+
+    drawCoverLine("Chargeback Evidence", 20);
+    coverY -= 6;
+    drawCoverLine("Cover Summary", 16);
+    drawCoverLine(`Dispute Reason: ${reasonText || "—"}`);
+    coverY -= 6;
+    drawCoverLine("Top evidence included", 14);
+    if (strongestIncluded.length === 0) {
+      drawCoverLine("No evidence items marked present yet.");
+    } else {
+      strongestIncluded.forEach((item) => {
+        drawCoverLine(`• ${item.label}`);
+      });
+    }
+    coverY -= 6;
+    drawCoverLine("Timeline highlights", 14);
+    if (timelineHighlights.length === 0) {
+      drawCoverLine("No timeline events provided.");
+    } else {
+      timelineHighlights.forEach((event) => {
+        drawCoverLine(`• ${event}`);
+      });
+    }
+
+    let page = pdfDoc.addPage();
+    const { height } = page.getSize();
     let y = height - margin;
 
     const ensureSpace = (lines: number, size: number) => {
@@ -354,21 +653,34 @@ function EvidenceApp() {
       }
     };
 
-    const checklistItems = computeChecklist(form);
-    const compellingItems = [
-      ...checklistItems.filter((item) => item.present),
-      ...checklistItems.filter((item) => !item.present),
-    ];
-
     drawLine("Chargeback Evidence", 20);
     y -= 8;
 
     drawLine("Summary", 14);
     drawLine(`Merchant: ${form.merchant_name || "—"}`);
     drawLine(`Order ID: ${form.order_id || "—"}`);
+    drawLine(`Dispute Reason: ${reasonText || "—"}`);
     drawLine(
       `Amount: ${form.amount ? `${form.amount} ${form.currency}` : "—"}`,
     );
+
+    y -= 10;
+    drawLine("Key Evidence Summary (Prioritized for Review)", 14);
+    evidenceByStrength.forEach((item) => {
+      drawLine(`• ${item.label} — ${item.present ? "Present" : "Missing"}`);
+    });
+
+    y -= 10;
+    drawLine("Evidence Checklist", 14);
+    evidenceByPriority.forEach((item) => {
+      const priorityLabel =
+        item.priority === "critical" ? "Critical" : "Recommended";
+      drawLine(
+        `• ${item.label} (${priorityLabel}) — ${
+          item.present ? "Present" : "Missing"
+        }`,
+      );
+    });
 
     y -= 10;
     drawLine("Timeline", 14);
@@ -388,18 +700,6 @@ function EvidenceApp() {
         }
       });
     }
-
-    y -= 10;
-    drawLine("Key Evidence Summary (Prioritized for Review)", 14);
-    compellingItems.forEach((item) => {
-      drawLine(`• ${item.label} — ${item.present ? "Present" : "Missing"}`);
-    });
-
-    y -= 10;
-    drawLine("Evidence Checklist", 14);
-    checklistItems.forEach((item) => {
-      drawLine(`• ${item.label} — ${item.present ? "Present" : "Missing"}`);
-    });
 
     y -= 10;
     drawLine("Attachment Index", 14);
@@ -422,25 +722,28 @@ function EvidenceApp() {
       });
     }
 
-    if (SHOW_BRANDING_FOOTER) {
-      page.drawText("Generated by DisputeShield.app", {
+    pdfDoc.getPages().forEach((pdfPage) => {
+      if (SHOW_BRANDING_FOOTER) {
+        pdfPage.drawText("Generated by DisputeShield.app", {
+          x: margin,
+          y: 42,
+          size: 9,
+          font,
+          color: rgb(0, 0, 0),
+        });
+      }
+
+      pdfPage.drawText(`Generated by DisputeShield on ${generatedAt}`, {
         x: margin,
-        y: 42,
-        size: 9,
+        y: 30,
+        size: 10,
         font,
         color: rgb(0, 0, 0),
       });
-    }
-
-    page.drawText(`Generated by DisputeShield on ${new Date().toLocaleString()}`, {
-      x: margin,
-      y: 30,
-      size: 10,
-      font,
-      color: rgb(0, 0, 0),
     });
 
-    return pdfDoc.save();
+    const bytes = await pdfDoc.save();
+    return { bytes, pageCount: pdfDoc.getPageCount() };
   };
 
   const setPdfFromBytes = (bytes: Uint8Array) => {
@@ -470,9 +773,13 @@ function EvidenceApp() {
         return;
       }
 
-      const bytes = await createPdfBytes();
-      setPdfBytes(bytes);
-      setPdfFromBytes(bytes);
+      const result = await createPdfBytes();
+      setPdfBytes(result.bytes);
+      setPdfStats({
+        sizeBytes: result.bytes.length,
+        pageCount: result.pageCount,
+      });
+      setPdfFromBytes(result.bytes);
     } catch (error) {
       console.error(error);
       setExportError("Failed to generate PDF. Please try again.");
@@ -523,9 +830,14 @@ function EvidenceApp() {
 
       let bytes = pdfBytes;
       if (!bytes) {
-        bytes = await createPdfBytes();
-        setPdfBytes(bytes);
-        setPdfFromBytes(bytes);
+        const result = await createPdfBytes();
+        bytes = result.bytes;
+        setPdfBytes(result.bytes);
+        setPdfStats({
+          sizeBytes: result.bytes.length,
+          pageCount: result.pageCount,
+        });
+        setPdfFromBytes(result.bytes);
       }
 
       if (!hasAttachments) {
@@ -534,17 +846,21 @@ function EvidenceApp() {
         );
       }
 
-      const checklistItems = computeChecklist(form);
-      const checklistLines = checklistItems.map(
-        (item) => `- ${item.label}: ${item.present ? "Present" : "Missing"}`,
-      );
+      const checklistItems = sortEvidenceByPriority(evidenceItems);
+      const checklistLines = checklistItems.map((item) => {
+        const priorityLabel =
+          item.priority === "critical" ? "Critical" : "Recommended";
+        return `- ${item.label} (${priorityLabel}): ${
+          item.present ? "Present" : "Missing"
+        }`;
+      });
 
       const summary = [
         `Merchant Name: ${form.merchant_name || "—"}`,
         `Order ID: ${form.order_id || "—"}`,
         `Amount: ${form.amount || "—"}`,
         `Currency: ${form.currency || "—"}`,
-        `Dispute Reason: ${form.dispute_reason || "—"}`,
+        `Dispute Reason: ${reasonLabel || "—"}`,
         `Customer Email: ${form.customer_email || "—"}`,
         `Billing Address: ${form.billing_address || "—"}`,
         `IP Address: ${form.ip_address || "—"}`,
@@ -566,6 +882,36 @@ function EvidenceApp() {
         const normalized = normalizeTimelineEvent(event);
         csvLines.push(`${index + 1},${csvEscape(normalized)}`);
       });
+
+      const submissionNotesLines: string[] = [];
+      submissionNotesLines.push(
+        `Submission Summary: ${reasonLabel} dispute for order ${form.order_id || "—"} in the amount of ${form.amount || "—"} ${form.currency || ""}. Evidence packet includes timeline, policies, and supporting materials generated by the merchant.`,
+      );
+      submissionNotesLines.push("");
+      submissionNotesLines.push("Attached evidence:");
+      if (attachments.length === 0) {
+        submissionNotesLines.push("- No attachments included.");
+      } else {
+        attachments.forEach((attachment) => {
+          submissionNotesLines.push(`- ${attachment.file.name}`);
+        });
+      }
+      submissionNotesLines.push("");
+      submissionNotesLines.push("Timeline highlights:");
+      if (form.timeline.length === 0) {
+        submissionNotesLines.push("- No timeline events provided.");
+      } else {
+        form.timeline.forEach((event) => {
+          submissionNotesLines.push(`- ${normalizeTimelineEvent(event)}`);
+        });
+      }
+      if (hasValue(form.policy_url)) {
+        submissionNotesLines.push("");
+        submissionNotesLines.push("Policy link:");
+        submissionNotesLines.push(form.policy_url.trim());
+      }
+
+      const submissionNotes = submissionNotesLines.join("\n");
 
       const zip = new JSZip();
       const attachmentsFolder = zip.folder("attachments");
@@ -594,6 +940,7 @@ function EvidenceApp() {
 
       zip.file("evidence.pdf", bytes);
       zip.file("summary.txt", summary);
+      zip.file("submission-notes.txt", submissionNotes);
       zip.file("timeline.csv", csvLines.join("\n"));
 
       const zipBlob = await zip.generateAsync({ type: "blob" });
@@ -697,15 +1044,23 @@ function EvidenceApp() {
           <label htmlFor="dispute_reason" className="text-sm font-semibold">
             Dispute Reason
           </label>
-          <textarea
+          <select
             id="dispute_reason"
-            className={`${inputClassName} min-h-[96px]`}
+            className={inputClassName}
             value={form.dispute_reason}
             onChange={(event) =>
-              updateField("dispute_reason", event.target.value)
+              updateField(
+                "dispute_reason",
+                event.target.value as DisputeReason,
+              )
             }
-            placeholder="Customer claims item not received."
-          />
+          >
+            {DISPUTE_REASONS.map((reasonOption) => (
+              <option key={reasonOption.value} value={reasonOption.value}>
+                {reasonOption.label}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -847,6 +1202,39 @@ function EvidenceApp() {
 
       <section className="space-y-4">
         <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-slate-900">
+            Recommended evidence
+          </h2>
+          <span className="text-xs text-slate-500">For {reasonLabel}</span>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          {evidenceItems.map((item) => (
+            <div
+              key={item.id}
+              className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm"
+            >
+              <div className="flex items-start gap-2">
+                <span className="text-slate-700">{item.label}</span>
+                <span title={item.tooltip} className="text-xs text-slate-400">
+                  ?
+                </span>
+              </div>
+              <span
+                className={`text-xs font-semibold ${
+                  item.priority === "critical"
+                    ? "text-rose-600"
+                    : "text-slate-500"
+                }`}
+              >
+                {item.priority === "critical" ? "Critical" : "Recommended"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-slate-900">Timeline</h2>
           <span className="text-xs text-slate-500">
             Normalized to sentence case in exports
@@ -945,29 +1333,61 @@ function EvidenceApp() {
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold text-slate-900">Evidence checklist</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-slate-900">
+            Evidence checklist
+          </h2>
+          <span className="text-xs text-slate-500">
+            Critical vs recommended
+          </span>
+        </div>
         {showChecklistWarning && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
             2 or more recommended items are missing. Consider adding supporting
             evidence before exporting.
           </div>
         )}
-        <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
-          {checklist.map((item) => (
-            <div
-              key={item.id}
-              className="flex items-center justify-between text-sm"
-            >
-              <span className="text-slate-700">{item.label}</span>
-              <span
-                className={`text-xs font-semibold ${
-                  item.present ? "text-emerald-600" : "text-rose-600"
-                }`}
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold uppercase text-slate-500">
+              Critical
+            </p>
+            {criticalEvidence.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between text-sm"
               >
-                {item.present ? "Present" : "Missing"}
-              </span>
-            </div>
-          ))}
+                <span className="text-slate-700">{item.label}</span>
+                <span
+                  className={`text-xs font-semibold ${
+                    item.present ? "text-emerald-600" : "text-rose-600"
+                  }`}
+                >
+                  {item.present ? "Present" : "Missing"}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
+            <p className="text-xs font-semibold uppercase text-slate-500">
+              Recommended
+            </p>
+            {recommendedEvidence.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between text-sm"
+              >
+                <span className="text-slate-700">{item.label}</span>
+                <span
+                  className={`text-xs font-semibold ${
+                    item.present ? "text-emerald-600" : "text-rose-600"
+                  }`}
+                >
+                  {item.present ? "Present" : "Missing"}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
@@ -1003,6 +1423,34 @@ function EvidenceApp() {
       </section>
 
       <section className="space-y-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase text-slate-500">
+              Export guardrails
+            </span>
+            <span>{pdfEstimateText}</span>
+            <span>{attachmentsEstimateText}</span>
+          </div>
+          {showPdfLimitWarning && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-700">
+              Warning: this PDF may exceed common bank limits (2–3MB or high
+              page count).
+            </div>
+          )}
+          {showAttachmentSizeWarning && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-700">
+              Warning: attachments are large and may push the ZIP over upload
+              limits.
+            </div>
+          )}
+          {(showPdfLimitWarning || showAttachmentSizeWarning) && (
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-slate-600">
+              <li>Consolidate screenshots into a single PDF.</li>
+              <li>Include only the most relevant policy excerpts.</li>
+              <li>Merge customer communications into one file.</li>
+            </ul>
+          )}
+        </div>
         <div className="flex flex-wrap gap-3">
           <button
             type="button"
