@@ -11,10 +11,27 @@ type TurnstileResponse = {
 const app = new Hono<{ Bindings: Bindings }>();
 const allowedOrigin = "https://disputeshield.app";
 
-const applyCors = (c: { header: (name: string, value: string) => void }) => {
+const applyCors = (c: {
+  header: (name: string, value: string) => void;
+}) => {
   c.header("Access-Control-Allow-Origin", allowedOrigin);
   c.header("Access-Control-Allow-Methods", "POST, OPTIONS");
   c.header("Access-Control-Allow-Headers", "Content-Type");
+  c.header("Access-Control-Max-Age", "86400");
+  c.header("Vary", "Origin");
+};
+
+const jsonWithCors = (
+  c: {
+    header: (name: string, value: string) => void;
+    json: (body: unknown, status?: number) => Response;
+  },
+  body: unknown,
+  status = 200,
+) => {
+  applyCors(c);
+  c.header("Content-Type", "application/json");
+  return c.json(body, status);
 };
 
 app.options("/turnstile/verify", (c) => {
@@ -23,7 +40,6 @@ app.options("/turnstile/verify", (c) => {
 });
 
 app.post("/turnstile/verify", async (c) => {
-  applyCors(c);
   let token = "";
   try {
     const body = (await c.req.json()) as { token?: string };
@@ -33,12 +49,12 @@ app.post("/turnstile/verify", async (c) => {
   }
 
   if (!token) {
-    return c.json({ ok: false }, 400);
+    return jsonWithCors(c, { ok: false }, 400);
   }
 
   const secret = c.env.TURNSTILE_SECRET;
   if (!secret) {
-    return c.json({ ok: false }, 500);
+    return jsonWithCors(c, { ok: false }, 500);
   }
 
   const formData = new FormData();
@@ -54,7 +70,7 @@ app.post("/turnstile/verify", async (c) => {
   );
 
   const data = (await response.json()) as TurnstileResponse;
-  return c.json({ ok: Boolean(data.success) });
+  return jsonWithCors(c, { ok: Boolean(data.success) }, 200);
 });
 
 export default app;
