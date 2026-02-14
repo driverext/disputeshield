@@ -421,8 +421,11 @@ export default function App() {
     return pdfDoc.save();
   };
 
+  const toArrayBuffer = (bytes: Uint8Array) =>
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+
   const setPdfFromBytes = (bytes: Uint8Array) => {
-    const blob = new Blob([bytes], { type: "application/pdf" });
+    const blob = new Blob([toArrayBuffer(bytes)], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
 
     setPdfUrl((prev) => {
