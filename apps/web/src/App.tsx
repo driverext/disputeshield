@@ -406,12 +406,16 @@ function EvidenceApp() {
   const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITEKEY as
     | string
     | undefined;
-  const workerBaseUrl =
-    (import.meta.env.VITE_WORKER_URL as string | undefined) ?? "";
-  const workerVerifyUrl = workerBaseUrl
-    ? `${workerBaseUrl.replace(/\/$/, "")}/turnstile/verify`
+  const workerBaseUrl = (import.meta.env.VITE_WORKER_URL as string | undefined) ?? "";
+  const normalizedWorkerBaseUrl =
+    workerBaseUrl && !/^https?:\/\//i.test(workerBaseUrl)
+      ? `https://${workerBaseUrl}`
+      : workerBaseUrl;
+  const workerVerifyUrl = normalizedWorkerBaseUrl
+    ? new URL("/turnstile/verify", normalizedWorkerBaseUrl).toString()
     : "";
-  const isWorkerConfigured = workerVerifyUrl.length > 0;
+  const isWorkerConfigured =
+    Boolean(workerVerifyUrl) && /^https?:\/\//i.test(normalizedWorkerBaseUrl);
   const humanVerifyMessage = "Verify you’re human to export.";
   const hasHumanToken = isDev || Boolean(turnstileToken);
   const canGeneratePdf =
@@ -791,7 +795,9 @@ function EvidenceApp() {
   };
 
   const generatePdf = async () => {
-    console.info("Worker URL:", workerVerifyUrl || "not configured");
+    if (isDev) {
+      console.info("Worker URL:", workerVerifyUrl || "not configured");
+    }
     if (!hasHumanToken) {
       setExportError(humanVerifyMessage);
       return;
