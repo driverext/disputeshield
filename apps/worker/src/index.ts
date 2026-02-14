@@ -1,4 +1,5 @@
 ﻿import { Hono } from "hono";
+import { cors } from "hono/cors";
 
 type Bindings = {
   TURNSTILE_SECRET: string;
@@ -8,17 +9,30 @@ type TurnstileResponse = {
   success?: boolean;
 };
 
+const app = new Hono<{ Bindings: Bindings }>();
 const allowedOrigin = "https://disputeshield.app";
 
-const app = new Hono<{ Bindings: Bindings }>();
+const isPreviewOrigin = (origin: string) =>
+  origin.startsWith("https://") && origin.endsWith(".pages.dev");
 
-const jsonResponse = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
+app.use(
+  "*",
+  cors({
+    origin: (origin) => {
+      if (!origin) {
+        return allowedOrigin;
+      }
+      if (origin === allowedOrigin || isPreviewOrigin(origin)) {
+        return origin;
+      }
+      return allowedOrigin;
     },
-  });
+    allowMethods: ["POST", "OPTIONS"],
+    allowHeaders: ["Content-Type"],
+  }),
+);
+
+app.options("/turnstile/verify", (c) => c.body(null, 204));
 
 app.post("/turnstile/verify", async (c) => {
   let token = "";
@@ -30,12 +44,12 @@ app.post("/turnstile/verify", async (c) => {
   }
 
   if (!token) {
-    return jsonResponse({ ok: false }, 400);
+    return c.json({ ok: false }, 400);
   }
 
   const secret = c.env.TURNSTILE_SECRET;
   if (!secret) {
-    return jsonResponse({ ok: false }, 500);
+    return c.json({ ok: false }, 500);
   }
 
   const formData = new FormData();
@@ -51,35 +65,7 @@ app.post("/turnstile/verify", async (c) => {
   );
 
   const data = (await response.json()) as TurnstileResponse;
-  return jsonResponse({ ok: Boolean(data.success) }, 200);
+  return c.json({ ok: Boolean(data.success) }, 200);
 });
 
-const addCors = (res: Response) => {
-  const headers = new Headers(res.headers);
-  headers.set("Access-Control-Allow-Origin", allowedOrigin);
-  headers.set("Vary", "Origin");
-  return new Response(res.body, {
-    status: res.status,
-    statusText: res.statusText,
-    headers,
-  });
-};
-
-export default {
-  fetch: (request: Request, env: Bindings, ctx: ExecutionContext) => {
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": allowedOrigin,
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-          "Access-Control-Max-Age": "86400",
-          Vary: "Origin",
-        },
-      });
-    }
-
-    return app.fetch(request, env, ctx).then(addCors);
-  },
-};
+export default app;
