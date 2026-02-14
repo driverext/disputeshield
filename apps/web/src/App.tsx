@@ -410,12 +410,21 @@ function EvidenceApp() {
     (import.meta.env.VITE_WORKER_URL as string | undefined) ?? "";
   const workerVerifyUrl = workerBaseUrl
     ? `${workerBaseUrl.replace(/\/$/, "")}/turnstile/verify`
-    : "/turnstile/verify";
+    : "";
+  const isWorkerConfigured = workerVerifyUrl.length > 0;
   const humanVerifyMessage = "Verify you’re human to export.";
   const hasHumanToken = isDev || Boolean(turnstileToken);
-  const canGeneratePdf = hasHumanToken && !isGeneratingPdf && !isVerifying;
+  const canGeneratePdf =
+    hasHumanToken &&
+    !isGeneratingPdf &&
+    !isVerifying &&
+    (isDev || isWorkerConfigured);
   const canExportZip =
-    orderIdTrimmed.length > 0 && hasHumanToken && !isZipping && !isVerifying;
+    orderIdTrimmed.length > 0 &&
+    hasHumanToken &&
+    !isZipping &&
+    !isVerifying &&
+    (isDev || isWorkerConfigured);
   const reason = form.dispute_reason;
   const reasonLabel = getReasonLabel(reason);
   const evidenceItems = buildEvidenceItems(reason, form, attachments);
@@ -521,6 +530,10 @@ function EvidenceApp() {
   const verifyTurnstileToken = async () => {
     if (isDev) {
       return true;
+    }
+
+    if (!isWorkerConfigured) {
+      return false;
     }
 
     if (!turnstileToken) {
@@ -778,8 +791,14 @@ function EvidenceApp() {
   };
 
   const generatePdf = async () => {
+    console.info("Worker URL:", workerVerifyUrl || "not configured");
     if (!hasHumanToken) {
       setExportError(humanVerifyMessage);
+      return;
+    }
+
+    if (!isWorkerConfigured && !isDev) {
+      setExportError("Worker URL is not configured. Set VITE_WORKER_URL.");
       return;
     }
 
@@ -830,6 +849,13 @@ function EvidenceApp() {
 
     if (!hasHumanToken) {
       setZipError(humanVerifyMessage);
+      setZipSuccess(null);
+      setZipTip(null);
+      return;
+    }
+
+    if (!isWorkerConfigured && !isDev) {
+      setZipError("Worker URL is not configured. Set VITE_WORKER_URL.");
       setZipSuccess(null);
       setZipTip(null);
       return;
@@ -1412,9 +1438,18 @@ function EvidenceApp() {
 
       <section className="space-y-4">
         <h2 className="text-lg font-semibold text-slate-900">Human verification</h2>
+        {isDev && (
+          <p className="text-xs text-slate-500">
+            Worker URL: {workerVerifyUrl || "not configured"}
+          </p>
+        )}
         {isDev ? (
           <p className="text-sm text-slate-600">
             Turnstile bypass enabled in development.
+          </p>
+        ) : !isWorkerConfigured ? (
+          <p className="text-sm text-red-600">
+            Worker URL is not configured. Set VITE_WORKER_URL.
           </p>
         ) : turnstileSiteKey ? (
           <Turnstile
