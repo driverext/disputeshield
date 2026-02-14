@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
 import JSZip from "jszip";
 import { Turnstile } from "@marsidev/react-turnstile";
@@ -400,6 +400,7 @@ function EvidenceApp() {
   const [isVerifying, setIsVerifying] = useState(false);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const verifyInFlightRef = useRef<Promise<boolean> | null>(null);
 
   const orderIdTrimmed = form.order_id.trim();
   const isDev = import.meta.env.DEV;
@@ -533,41 +534,59 @@ function EvidenceApp() {
 
   const verifyTurnstileToken = async () => {
     if (isDev) {
+      console.info("Turnstile verify start", workerVerifyUrl);
+      console.info("Turnstile verify end", "dev-bypass");
       return true;
     }
 
-    if (!isWorkerConfigured) {
+    if (!isWorkerConfigured || !turnstileToken) {
       return false;
     }
 
-    if (!turnstileToken) {
-      return false;
+    if (verifyInFlightRef.current) {
+      return verifyInFlightRef.current;
     }
 
     setIsVerifying(true);
-    try {
-      const response = await fetch(workerVerifyUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: turnstileToken }),
-      });
+    const verifyPromise = (async () => {
+      let result = false;
+      try {
+        if (isDev) {
+          console.info("Turnstile verify start", workerVerifyUrl);
+        }
+        const response = await fetch(workerVerifyUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: turnstileToken }),
+        });
 
-      if (!response.ok) {
+        if (!response.ok) {
+          return false;
+        }
+
+        const data = (await response.json()) as { ok?: boolean };
+        result = Boolean(data.ok);
+        if (!result) {
+          setTurnstileToken(null);
+        }
+        return result;
+      } catch (error) {
+        console.error(error);
         return false;
+      } finally {
+        verifyInFlightRef.current = null;
+        setIsVerifying(false);
+        if (isDev) {
+          console.info(
+            "Turnstile verify end",
+            result ? "ok" : "failed",
+          );
+        }
       }
+    })();
 
-      const data = (await response.json()) as { ok?: boolean };
-      const ok = Boolean(data.ok);
-      if (!ok) {
-        setTurnstileToken(null);
-      }
-      return ok;
-    } catch (error) {
-      console.error(error);
-      return false;
-    } finally {
-      setIsVerifying(false);
-    }
+    verifyInFlightRef.current = verifyPromise;
+    return verifyPromise;
   };
 
   const createPdfBytes = async () => {
@@ -1589,3 +1608,4 @@ export default function App() {
     </BrowserRouter>
   );
 }
+

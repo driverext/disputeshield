@@ -1,5 +1,4 @@
 ﻿import { Hono } from "hono";
-import { cors } from "hono/cors";
 
 type Bindings = {
   TURNSTILE_SECRET: string;
@@ -10,17 +9,21 @@ type TurnstileResponse = {
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
+const allowedOrigin = "https://disputeshield.app";
 
-app.use(
-  "*",
-  cors({
-    origin: "*",
-    allowMethods: ["POST", "OPTIONS"],
-    allowHeaders: ["Content-Type"],
-  }),
-);
+const applyCors = (c: { header: (name: string, value: string) => void }) => {
+  c.header("Access-Control-Allow-Origin", allowedOrigin);
+  c.header("Access-Control-Allow-Methods", "POST, OPTIONS");
+  c.header("Access-Control-Allow-Headers", "Content-Type");
+};
+
+app.options("/turnstile/verify", (c) => {
+  applyCors(c);
+  return c.body(null, 204);
+});
 
 app.post("/turnstile/verify", async (c) => {
+  applyCors(c);
   let token = "";
   try {
     const body = (await c.req.json()) as { token?: string };
