@@ -391,6 +391,7 @@ function EvidenceApp() {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfStats, setPdfStats] = useState<PdfStats | null>(null);
+  const [pdfDirty, setPdfDirty] = useState(true);
   const [isZipping, setIsZipping] = useState(false);
   const [zipError, setZipError] = useState<string | null>(null);
   const [zipSuccess, setZipSuccess] = useState<string | null>(null);
@@ -415,7 +416,8 @@ function EvidenceApp() {
     orderIdTrimmed.length > 0 &&
     hasHumanToken &&
     !isZipping &&
-    !isVerifying;
+    !isVerifying &&
+    !pdfDirty;
   const reason = form.dispute_reason;
   const reasonLabel = getReasonLabel(reason);
   const evidenceItems = buildEvidenceItems(reason, form, attachments);
@@ -454,6 +456,16 @@ function EvidenceApp() {
       }
     };
   }, [pdfUrl]);
+
+  useEffect(() => {
+    if (pdfUrl) {
+      URL.revokeObjectURL(pdfUrl);
+    }
+    setPdfUrl(null);
+    setPdfBytes(null);
+    setPdfStats(null);
+    setPdfDirty(true);
+  }, [form, attachments]);
 
   const updateField = <K extends keyof FormState>(
     field: K,
@@ -818,6 +830,7 @@ function EvidenceApp() {
         pageCount: result.pageCount,
       });
       setPdfFromBytes(result.bytes);
+      setPdfDirty(false);
     } catch (error) {
       console.error(error);
       setExportError("Failed to generate PDF. Please try again.");
@@ -876,6 +889,7 @@ function EvidenceApp() {
           pageCount: result.pageCount,
         });
         setPdfFromBytes(result.bytes);
+        setPdfDirty(false);
       }
 
       if (!hasAttachments) {
@@ -1501,7 +1515,7 @@ function EvidenceApp() {
           <button
             type="button"
             onClick={downloadPdf}
-            disabled={!pdfUrl}
+            disabled={!pdfUrl || pdfDirty}
             className="rounded-full border border-slate-300 px-6 py-3 text-sm font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
             Download PDF
@@ -1515,6 +1529,11 @@ function EvidenceApp() {
             {isZipping ? "Building ZIP..." : "Download Evidence Packet (ZIP)"}
           </button>
         </div>
+        {pdfDirty && (
+          <p className="text-xs text-amber-600">
+            PDF out of date — click Generate PDF again.
+          </p>
+        )}
         {exportError && <p className="text-sm text-red-600">{exportError}</p>}
         {zipError && <p className="text-sm text-red-600">{zipError}</p>}
         {zipTip && <p className="text-sm text-slate-600">{zipTip}</p>}
